@@ -1,0 +1,69 @@
+#!/bin/bash
+# facial_lock — FaceLock CLI control
+# Install to: /usr/local/bin/facial_lock  (chown root:root, chmod 755)
+# Usage: sudo facial_lock [on|off|status|test]
+
+# ── Root check ──────────────────────────────────────────────────────────────
+if [ "$EUID" -ne 0 ]; then
+    echo "[FACELOCK] Error: must run as root. Use: sudo facial_lock $1"
+    exit 1
+fi
+
+FLAG="/var/run/facial_lock.active"
+SERVICE="facial_lock.service"
+LOG="/root/facial_lock/logs/facial_lock.log"
+
+# ── Command dispatch ─────────────────────────────────────────────────────────
+case "$1" in
+
+    on)
+        touch "$FLAG"
+        systemctl enable "$SERVICE" --now 2>/dev/null
+        echo "[FACELOCK] Facial authentication ENABLED"
+        echo "[FACELOCK] Camera will activate at every sudo / login / lock screen"
+        ;;
+
+    off)
+        rm -f "$FLAG"
+        systemctl disable "$SERVICE" --now 2>/dev/null
+        echo "[FACELOCK] Facial authentication DISABLED"
+        echo "[FACELOCK] System will use password-only authentication"
+        ;;
+
+    status)
+        if [ -f "$FLAG" ]; then
+            echo "[FACELOCK] Status: ACTIVE"
+        else
+            echo "[FACELOCK] Status: INACTIVE"
+        fi
+        echo ""
+        echo "--- Last 10 auth attempts ---"
+        if [ -f "$LOG" ]; then
+            tail -10 "$LOG"
+        else
+            echo "(no log file yet)"
+        fi
+        ;;
+
+    test)
+        echo "[FACELOCK] Running camera test — look at your webcam..."
+        /root/facial_lock/venv/bin/python3 /root/facial_lock/recognize_pam.py
+        CODE=$?
+        if [ $CODE -eq 0 ]; then
+            echo "[FACELOCK] TEST PASSED — Your face was recognized!"
+        else
+            echo "[FACELOCK] TEST FAILED — Face not recognized or timeout (exit code: $CODE)"
+            echo "[FACELOCK] Check log: tail -20 $LOG"
+        fi
+        ;;
+
+    *)
+        echo "Usage: sudo facial_lock [on|off|status|test]"
+        echo ""
+        echo "  on      → Enable facial authentication system-wide"
+        echo "  off     → Disable facial authentication"
+        echo "  status  → Show current state and recent auth log"
+        echo "  test    → Test camera and face recognition manually"
+        ;;
+
+esac

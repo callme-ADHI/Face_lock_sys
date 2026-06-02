@@ -247,12 +247,8 @@ def pam_sm_authenticate(pamh, flags, argv):
 
     else:
         # Non-TTY / GUI login flow (e.g. GDM, lock screen)
-        # Check if the user is already logged in (screen unlock vs initial login)
-        if not _is_user_logged_in(user):
-            _log(f"INFO - Initial boot login for {user}: skipping face auth to unlock keyring")
-            return pamh.PAM_IGNORE
-
-        _log("INFO - Non-TTY mode (Lock Screen): running sequential face auth")
+        # We just wait for the face auth request sequentially.
+        _log("INFO - Non-TTY mode (Login/Lock Screen): running sequential face auth")
         try:
             if _face_auth_request():
                 _log("SUCCESS - Face auth granted (non-TTY mode)")
@@ -262,6 +258,7 @@ def pam_sm_authenticate(pamh, flags, argv):
             _log(f"ERROR - Non-TTY face auth exception: {e}")
 
         return pamh.PAM_IGNORE
+
 
 
 

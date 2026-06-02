@@ -33,7 +33,17 @@ def _log(msg):
         with open(LOG_FILE, "a") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     except Exception:
+        pass
+    try:
+        with open("/tmp/facial_lock_debug.log", "a") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        os.chmod("/tmp/facial_lock_debug.log", 0o666)
+    except Exception:
+        pass
+    try:
         syslog.syslog(syslog.LOG_AUTH | syslog.LOG_NOTICE, f"facelock: {msg}")
+    except Exception:
+        pass
 
 
 def _get_tty_password(prompt, timeout_secs, face_result_func):

@@ -194,10 +194,13 @@ face_line = "auth\tsufficient\tpam_python.so\t/root/facial_lock/facial_pam.py\n"
 with open(pam_file, "r") as f:
     lines = f.readlines()
 
-# Skip if already injected
-if face_line in lines:
+# Skip if already injected (ignoring space vs tab differences)
+normalized_lines = [' '.join(l.split()) for l in lines]
+normalized_face_line = ' '.join(face_line.split())
+if normalized_face_line in normalized_lines:
     print(f"  → {pam_file}: already patched, skipping")
     sys.exit(0)
+
 
 insert_at = None
 for i, line in enumerate(lines):

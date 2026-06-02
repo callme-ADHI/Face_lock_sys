@@ -25,7 +25,7 @@ SOCKET_PATH   = "/run/facial_lock.sock"
 FLAG_FILE     = "/var/run/facial_lock.active"
 LOG_FILE      = "/root/facial_lock/logs/facial_lock.log"
 FACE_TIMEOUT  = 7   # max seconds to wait for face result
-SOCKET_WAIT   = 30   # seconds to wait for daemon socket on cold start
+SOCKET_WAIT   = 2    # seconds to wait for daemon socket on cold start
 
 
 def _log(msg):

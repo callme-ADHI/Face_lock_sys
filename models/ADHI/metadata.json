@@ -1,0 +1,10 @@
+{
+    "identity": "ADHI",
+    "total_images": 159,
+    "valid_faces": 156,
+    "skipped_images": 3,
+    "threshold": 0.5,
+    "mean_similarity": 0.8115912723617676,
+    "std_similarity": 0.15897150522718065,
+    "training_timestamp": "2026-06-02T10:17:28.209483"
+}

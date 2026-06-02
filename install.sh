@@ -83,22 +83,38 @@ fi
 
 rm -rf /root/facial_lock/venv
 
+# Install python3-venv if not present
+apt-get update -y >/dev/null 2>&1 || true
+apt-get install -y python3-venv python3-pip python3-dev >/dev/null 2>&1 || true
+
+info "Creating clean virtual environment in /root/facial_lock/venv..."
+python3 -m venv /root/facial_lock/venv
+
 if [ -n "$VENV_SRC" ]; then
-    info "Found existing Python virtual environment at $VENV_SRC. Symlinking to save space..."
-    ln -s "$(realpath "$VENV_SRC")" /root/facial_lock/venv
-    ok "Python venv symlinked"
+    info "Found existing Python virtual environment at $VENV_SRC."
+    info "Copying installed packages (saves download time and disk space)..."
+    SRC_LIB_DIR=$(ls -d "$VENV_SRC"/lib/python3.* 2>/dev/null | head -n 1 || true)
+    DST_LIB_DIR=$(ls -d /root/facial_lock/venv/lib/python3.* 2>/dev/null | head -n 1 || true)
+
+    if [ -n "$SRC_LIB_DIR" ] && [ -n "$DST_LIB_DIR" ] && [ -d "$SRC_LIB_DIR/site-packages" ]; then
+        cp -r "$SRC_LIB_DIR"/site-packages/* "$DST_LIB_DIR"/site-packages/
+        ok "Python site-packages copied successfully"
+    else
+        info "Failed to locate site-packages in $VENV_SRC. Falling back to fresh pip installation..."
+        /root/facial_lock/venv/bin/pip install --upgrade pip >/dev/null 2>&1 || true
+        /root/facial_lock/venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >/dev/null 2>&1
+        /root/facial_lock/venv/bin/pip install opencv-python facenet-pytorch numpy >/dev/null 2>&1
+        ok "Python dependencies installed successfully"
+    fi
 else
-    info "No existing Python virtual environment found. Creating new one in /root/facial_lock/venv..."
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y python3-venv python3-pip python3-dev >/dev/null 2>&1 || true
-    python3 -m venv /root/facial_lock/venv
-    info "Installing Python dependencies (PyTorch CPU, OpenCV, facenet-pytorch)..."
+    info "No existing Python virtual environment found. Installing Python dependencies..."
     /root/facial_lock/venv/bin/pip install --upgrade pip >/dev/null 2>&1 || true
     /root/facial_lock/venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >/dev/null 2>&1
     /root/facial_lock/venv/bin/pip install opencv-python facenet-pytorch numpy >/dev/null 2>&1
     ok "Python dependencies installed successfully"
 fi
 echo ""
+
 
 
 # ────────────────────────────────────────────────────────────────────────────

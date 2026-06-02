@@ -160,9 +160,17 @@ def pam_sm_authenticate(pamh, flags, argv):
     # Check if we are running in an interactive terminal/TTY context
     is_tty = False
     try:
-        is_tty = os.isatty(sys.stdin.fileno()) or os.path.exists("/dev/tty")
+        is_tty = sys.stdin.isatty()
     except Exception:
         pass
+
+    if not is_tty:
+        try:
+            fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+            os.close(fd)
+            is_tty = True
+        except Exception:
+            is_tty = False
 
     if is_tty:
         _log("INFO - Interactive TTY mode: starting parallel face + password auth")

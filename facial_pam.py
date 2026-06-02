@@ -24,7 +24,7 @@ import syslog
 SOCKET_PATH   = "/run/facial_lock.sock"
 FLAG_FILE     = "/var/run/facial_lock.active"
 LOG_FILE      = "/root/facial_lock/logs/facial_lock.log"
-FACE_TIMEOUT  = 12   # max seconds to wait for face result
+FACE_TIMEOUT  = 7   # max seconds to wait for face result
 SOCKET_WAIT   = 30   # seconds to wait for daemon socket on cold start
 
 
@@ -81,8 +81,15 @@ def _get_tty_password(prompt, timeout_secs, face_result_func):
 
         password = []
         start_time = time.time()
+        interactive_timeout = 4.0  # idle timeout for face detection
 
-        while time.time() - start_time < timeout_secs:
+        while True:
+            current_time = time.time()
+            elapsed = current_time - start_time
+            limit = 30.0 if password else interactive_timeout
+            if elapsed >= limit:
+                break
+
             # Check background face auth state
             if face_result_func() is True:
                 return True, None
@@ -103,10 +110,10 @@ def _get_tty_password(prompt, timeout_secs, face_result_func):
                     raise KeyboardInterrupt()
                 else:
                     password.append(char)
-        else:
+        if not password:
             return False, None
-
         return False, "".join(password)
+
 
     finally:
         # Restore terminal settings and print newline
@@ -243,7 +250,8 @@ def pam_sm_authenticate(pamh, flags, argv):
             return pamh.PAM_IGNORE
 
         _log("FAIL - Face failed and no password entered")
-        return pamh.PAM_AUTH_ERR
+        return pamh.PAM_IGNORE
+
 
     else:
         # Non-TTY / GUI login flow (e.g. GDM, lock screen)

@@ -15,7 +15,7 @@ LOG_FILE    = "/root/facial_lock/logs/facial_lock.log"
 MODELS_DIR  = "/root/facial_lock/models"
 FACENET_DIR = "/root/facial_lock/facenet_weights"
 DEFAULT_THR = 0.7
-TIMEOUT_SEC = 12
+TIMEOUT_SEC = 5
 
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 logging.basicConfig(

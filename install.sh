@@ -28,13 +28,26 @@ info "STEP 1 — Checking prerequisites..."
 
 [ -e /dev/video0 ] || fail "Camera not found at /dev/video0. Plug in your webcam and retry."
 
-MODEL_SRC="/home/adhi/Desktop/Facenet-training-pipeline/models/ADHI/mean_embedding.npy"
-[ -f "$MODEL_SRC" ] || fail "Trained model not found: $MODEL_SRC"
+# Allow passing the model directory as an argument (e.g., /path/to/models/)
+# Or look in current directory "./models"
+MODEL_SRC_DIR=""
+if [ $# -gt 0 ] && [ -d "$1" ]; then
+    MODEL_SRC_DIR="$1"
+elif [ -d "./models" ]; then
+    MODEL_SRC_DIR="./models"
+elif [ -d "/home/adhi/Desktop/Facenet-training-pipeline/models" ]; then
+    MODEL_SRC_DIR="/home/adhi/Desktop/Facenet-training-pipeline/models"
+fi
 
-VENV_SRC="/home/adhi/Desktop/Facenet-training-pipeline/venv"
-[ -d "$VENV_SRC" ] || fail "Python venv not found: $VENV_SRC"
+if [ -z "$MODEL_SRC_DIR" ]; then
+    echo "[✗] Error: No face model directory found."
+    echo "    Please place your trained user model folder (containing mean_embedding.npy) inside a folder named 'models/' in this directory,"
+    echo "    or specify the path as an argument:"
+    echo "    sudo bash install.sh /path/to/models/"
+    exit 1
+fi
 
-ok "Prerequisites OK"
+ok "Face model directory found at: $MODEL_SRC_DIR"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -48,24 +61,45 @@ ok "Directories created"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Copy trained model
+# STEP 3 — Copy trained models
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 3 — Copying trained model (ADHI)..."
-rm -rf /root/facial_lock/models/ADHI
-cp -r /home/adhi/Desktop/Facenet-training-pipeline/models/ADHI \
-      /root/facial_lock/models/ADHI
-ok "Trained model copied"
+info "STEP 3 — Copying trained model templates..."
+# Copy all user subdirectories from the model source dir to /root/facial_lock/models/
+cp -r "$MODEL_SRC_DIR"/* /root/facial_lock/models/
+ok "Trained models copied to /root/facial_lock/models/"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Symlink Python venv (avoids copying multi-GB PyTorch to /root)
+# STEP 4 — Set up Python virtual environment
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 4 — Symlinking Python venv (no copy — saves disk space)..."
+info "STEP 4 — Setting up Python virtual environment..."
+
+VENV_SRC=""
+if [ -d "./venv" ]; then
+    VENV_SRC="./venv"
+elif [ -d "/home/adhi/Desktop/Facenet-training-pipeline/venv" ]; then
+    VENV_SRC="/home/adhi/Desktop/Facenet-training-pipeline/venv"
+fi
+
 rm -rf /root/facial_lock/venv
-ln -s /home/adhi/Desktop/Facenet-training-pipeline/venv \
-      /root/facial_lock/venv
-ok "Python venv symlinked → /home/adhi/Desktop/Facenet-training-pipeline/venv"
+
+if [ -n "$VENV_SRC" ]; then
+    info "Found existing Python virtual environment at $VENV_SRC. Symlinking to save space..."
+    ln -s "$(realpath "$VENV_SRC")" /root/facial_lock/venv
+    ok "Python venv symlinked"
+else
+    info "No existing Python virtual environment found. Creating new one in /root/facial_lock/venv..."
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y python3-venv python3-pip python3-dev >/dev/null 2>&1 || true
+    python3 -m venv /root/facial_lock/venv
+    info "Installing Python dependencies (PyTorch CPU, OpenCV, facenet-pytorch)..."
+    /root/facial_lock/venv/bin/pip install --upgrade pip >/dev/null 2>&1 || true
+    /root/facial_lock/venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu >/dev/null 2>&1
+    /root/facial_lock/venv/bin/pip install opencv-python facenet-pytorch numpy >/dev/null 2>&1
+    ok "Python dependencies installed successfully"
+fi
 echo ""
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # STEP 5 — Install daemon and pam files

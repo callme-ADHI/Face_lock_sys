@@ -1,28 +1,30 @@
 """
-facial_pam.py — Face-first auth via pam_python.so
+facial_pam.py — Parallel face auth + TTY password grabber via pam_python.so
 
 Algorithm:
-  1. Try face auth silently (camera ON, no prompt shown yet)
-     - If face matched in time → grant immediately, NO user input ever
-  2. If face fails/timeout → pam_unix.so shows password prompt normally
-
-For "parallel" UX (camera + password at same time), we try TIOCSTI to
-auto-inject Enter when face is detected while password prompt is shown.
-If TIOCSTI is blocked by the kernel, we fall back to sequential mode.
+  - If TTY is available (e.g. terminal sudo):
+    - Starts the camera daemon in the background.
+    - Prompts the user for their password on /dev/tty (with echo off) in a non-blocking loop.
+    - If the face is matched, it immediately exits the loop, restores the terminal, and logs in (zero user input).
+    - If the user types their password, it collects it and forwards it to pam_unix.so via PAM_AUTHTOK.
+  - If TTY is not available (e.g. GUI login):
+    - Performs sequential face auth (silently waits for face).
+    - If face matches → log in.
+    - If face fails → falls back to GUI password prompt.
 """
 import os
 import sys
 import time
 import socket
 import threading
-import fcntl
+import select
 import termios
 import syslog
 
 SOCKET_PATH   = "/run/facial_lock.sock"
 FLAG_FILE     = "/var/run/facial_lock.active"
 LOG_FILE      = "/root/facial_lock/logs/facial_lock.log"
-FACE_TIMEOUT  = 8    # seconds face auth waits before falling back to password
+FACE_TIMEOUT  = 12   # max seconds to wait for face result
 SOCKET_WAIT   = 30   # seconds to wait for daemon socket on cold start
 
 
@@ -34,43 +36,99 @@ def _log(msg):
         syslog.syslog(syslog.LOG_AUTH | syslog.LOG_NOTICE, f"facelock: {msg}")
 
 
-def _tiocsti_available():
-    """Check if TIOCSTI is allowed on this kernel."""
+def _get_tty_password(prompt, timeout_secs, face_result_func):
+    """
+    Prompt the user for a password on /dev/tty, masking input.
+    Periodically checks face_result_func().
+    Returns (True, None) if face matched.
+    Returns (False, password_str) if user typed password.
+    Returns (False, None) on timeout/error.
+    """
+    tty_fd = None
+    old_settings = None
     try:
-        val = open("/proc/sys/kernel/tiocsti_restrict").read().strip()
-        return val == "0"
-    except Exception:
-        return True  # assume allowed if sysctl not present
-
-
-def _try_inject_enter():
-    """Try to inject Enter keystroke into terminal input via TIOCSTI."""
-    try:
-        # Try on stdin (fd 0) first — most reliable in PAM context
-        fcntl.ioctl(0, termios.TIOCSTI, b"\n")
-        _log("INFO - TIOCSTI Enter injected on stdin")
-        return True
-    except Exception:
-        pass
-    try:
-        fd = os.open("/dev/tty", os.O_RDWR)
-        fcntl.ioctl(fd, termios.TIOCSTI, b"\n")
-        os.close(fd)
-        _log("INFO - TIOCSTI Enter injected on /dev/tty")
-        return True
+        # Open the actual terminal tty device to prevent stdout redirection issues
+        tty_fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
     except Exception as e:
-        _log(f"WARN - TIOCSTI unavailable ({e}) — using sequential mode")
-        return False
+        _log(f"WARN - Could not open /dev/tty ({e}), falling back to stdin")
+        try:
+            tty_fd = sys.stdin.fileno()
+        except Exception:
+            return False, None
+
+    try:
+        # Print prompt
+        os.write(tty_fd, prompt.encode("utf-8", errors="ignore"))
+
+        # Disable terminal echo and canonical mode (line buffering)
+        try:
+            old_settings = termios.tcgetattr(tty_fd)
+            new_settings = termios.tcgetattr(tty_fd)
+            new_settings[3] = new_settings[3] & ~termios.ECHO & ~termios.ICANON
+            termios.tcsetattr(tty_fd, termios.TCSANOW, new_settings)
+        except Exception as e:
+            _log(f"WARN - Termios setup failed: {e}")
+
+        password = []
+        start_time = time.time()
+
+        while time.time() - start_time < timeout_secs:
+            # Check background face auth state
+            if face_result_func() is True:
+                return True, None
+
+            # Poll input with a short timeout
+            r, _, _ = select.select([tty_fd], [], [], 0.1)
+            if r:
+                char_bytes = os.read(tty_fd, 1)
+                if not char_bytes:
+                    break
+                char = char_bytes.decode("utf-8", errors="ignore")
+                if char in ("\n", "\r"):
+                    break
+                elif char in ("\x7f", "\x08"):  # Backspace / Ctrl-H
+                    if password:
+                        password.pop()
+                elif char == "\x03":  # Ctrl-C
+                    raise KeyboardInterrupt()
+                else:
+                    password.append(char)
+        else:
+            return False, None
+
+        return False, "".join(password)
+
+    finally:
+        # Restore terminal settings and print newline
+        if old_settings is not None:
+            try:
+                termios.tcsetattr(tty_fd, termios.TCSANOW, old_settings)
+            except Exception:
+                pass
+        try:
+            os.write(tty_fd, b"\n")
+        except Exception:
+            pass
+        if tty_fd is not None and tty_fd != sys.stdin.fileno():
+            try:
+                os.close(tty_fd)
+            except Exception:
+                pass
+
 
 
 def _face_auth_request():
     """Connect to daemon and get face auth result. Returns True/False."""
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(FACE_TIMEOUT + 2)
-    s.connect(SOCKET_PATH)
-    resp = s.recv(16).strip()
-    s.close()
-    return resp == b"OK"
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(FACE_TIMEOUT)
+        s.connect(SOCKET_PATH)
+        resp = s.recv(16).strip()
+        s.close()
+        return resp == b"OK"
+    except Exception as e:
+        _log(f"ERROR - Socket communication failed: {e}")
+        return False
 
 
 def pam_sm_authenticate(pamh, flags, argv):
@@ -89,25 +147,25 @@ def pam_sm_authenticate(pamh, flags, argv):
             _log("WARN - Daemon not ready — password only")
             return pamh.PAM_IGNORE
 
-    tiocsti_ok = _tiocsti_available()
+    # Check if we are running in an interactive terminal/TTY context
+    is_tty = False
+    try:
+        is_tty = os.isatty(sys.stdin.fileno()) or os.path.exists("/dev/tty")
+    except Exception:
+        pass
 
-    if tiocsti_ok:
-        # ── PARALLEL MODE: password prompt + camera at same time ──────────
-        # Camera starts in background, password prompt shown immediately.
-        # When face matches, Enter is injected to auto-submit the prompt.
-        _log("INFO - Parallel mode (TIOCSTI available)")
+    if is_tty:
+        _log("INFO - Interactive TTY mode: starting parallel face + password auth")
         face_result = [None]
-        face_done   = threading.Event()
+        face_done = threading.Event()
 
         def _face_thread():
             try:
                 ok = _face_auth_request()
                 face_result[0] = ok
                 _log(f"INFO - Face result: {'OK' if ok else 'FAIL'}")
-                if ok:
-                    _try_inject_enter()
             except Exception as e:
-                _log(f"ERROR - Face thread: {e}")
+                _log(f"ERROR - Face thread exception: {e}")
                 face_result[0] = False
             finally:
                 face_done.set()
@@ -115,53 +173,45 @@ def pam_sm_authenticate(pamh, flags, argv):
         t = threading.Thread(target=_face_thread, daemon=True)
         t.start()
 
-        # Show password prompt immediately (camera already running)
-        password = ""
+        # Get prompt string
+        user = "root"
         try:
-            resp = pamh.conversation(
-                pamh.Message(pamh.PAM_PROMPT_ECHO_OFF, "Password: ")
-            )
-            if resp:
-                password = resp.resp or ""
-        except Exception as e:
-            _log(f"WARN - Conversation error: {e}")
+            user = pamh.get_user(None) or "user"
+        except Exception:
+            pass
+        prompt = f"[sudo] password for {user}: "
 
-        # Wait for face result (brief — should already be set)
-        face_done.wait(timeout=2.0)
+        # Start custom password loop
+        face_matched, password = _get_tty_password(prompt, FACE_TIMEOUT, lambda: face_result[0])
 
-        if face_result[0] is True:
-            _log("SUCCESS - Face auth granted (parallel mode)")
+        if face_matched:
+            _log("SUCCESS - Face auth granted (parallel mode, auto-login)")
             return pamh.PAM_SUCCESS
 
-        # Face failed — forward password to pam_unix.so (no second prompt)
-        if password:
+        if password is not None:
             try:
                 pamh.set_item(pamh.PAM_AUTHTOK, password)
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"ERROR - Failed to set PAM_AUTHTOK: {e}")
             _log("INFO - Face failed — password forwarded to pam_unix.so")
             return pamh.PAM_IGNORE
 
+        _log("FAIL - Face failed and no password entered")
         return pamh.PAM_AUTH_ERR
 
     else:
-        # ── SEQUENTIAL MODE: face first (silent), then password if needed ──
-        # Camera on for up to FACE_TIMEOUT seconds silently.
-        # If face matches → grant instantly, user presses NOTHING.
-        # If face fails → pam_unix.so shows password prompt.
-        _log("INFO - Sequential mode (TIOCSTI restricted)")
+        # Non-TTY / GUI login flow (e.g. GDM, lock screen)
+        # We just wait for the face auth request sequentially.
+        _log("INFO - Non-TTY mode: running sequential face auth")
         try:
-            ok = _face_auth_request()
-            if ok:
-                _log("SUCCESS - Face auth granted (sequential mode)")
+            if _face_auth_request():
+                _log("SUCCESS - Face auth granted (non-TTY mode)")
                 return pamh.PAM_SUCCESS
-            _log("FAIL - Face not detected — falling through to password")
-        except socket.timeout:
-            _log("FAIL - Face auth timed out — falling through to password")
+            _log("FAIL - Face not detected — falling back to GUI password")
         except Exception as e:
-            _log(f"ERROR - Face auth: {e} — falling through to password")
+            _log(f"ERROR - Non-TTY face auth exception: {e}")
 
-        return pamh.PAM_IGNORE   # pam_unix.so shows "Password:" prompt
+        return pamh.PAM_IGNORE
 
 
 def pam_sm_setcred(pamh, flags, argv):      return pamh.PAM_SUCCESS

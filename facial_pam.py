@@ -141,6 +141,33 @@ def _face_auth_request():
         return False
 
 
+def _is_user_logged_in(username):
+    """Check if the user has an active session (meaning this is a lock screen unlock, not initial boot)."""
+    if not username:
+        return False
+    try:
+        import subprocess
+        res = subprocess.run(
+            ["loginctl", "show-user", username, "-p", "State", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if res.returncode == 0 and res.stdout.strip() == "active":
+            return True
+    except Exception:
+        pass
+    # Fallback check via /run/user/<uid> presence
+    try:
+        import pwd
+        uid = pwd.getpwnam(username).pw_uid
+        if os.path.isdir(f"/run/user/{uid}"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def pam_sm_authenticate(pamh, flags, argv):
     # Skip if face lock is off
     if not os.path.isfile(FLAG_FILE):
@@ -156,6 +183,13 @@ def pam_sm_authenticate(pamh, flags, argv):
         if not os.path.exists(SOCKET_PATH):
             _log("WARN - Daemon not ready — password only")
             return pamh.PAM_IGNORE
+
+    # Get user name
+    user = "root"
+    try:
+        user = pamh.get_user(None) or "user"
+    except Exception:
+        pass
 
     # Check if we are running in an interactive terminal/TTY context
     is_tty = False
@@ -191,12 +225,6 @@ def pam_sm_authenticate(pamh, flags, argv):
         t = threading.Thread(target=_face_thread, daemon=True)
         t.start()
 
-        # Get prompt string
-        user = "root"
-        try:
-            user = pamh.get_user(None) or "user"
-        except Exception:
-            pass
         prompt = f"[sudo] password for {user}: "
 
         # Start custom password loop
@@ -219,8 +247,12 @@ def pam_sm_authenticate(pamh, flags, argv):
 
     else:
         # Non-TTY / GUI login flow (e.g. GDM, lock screen)
-        # We just wait for the face auth request sequentially.
-        _log("INFO - Non-TTY mode: running sequential face auth")
+        # Check if the user is already logged in (screen unlock vs initial login)
+        if not _is_user_logged_in(user):
+            _log(f"INFO - Initial boot login for {user}: skipping face auth to unlock keyring")
+            return pamh.PAM_IGNORE
+
+        _log("INFO - Non-TTY mode (Lock Screen): running sequential face auth")
         try:
             if _face_auth_request():
                 _log("SUCCESS - Face auth granted (non-TTY mode)")
@@ -230,6 +262,7 @@ def pam_sm_authenticate(pamh, flags, argv):
             _log(f"ERROR - Non-TTY face auth exception: {e}")
 
         return pamh.PAM_IGNORE
+
 
 
 def pam_sm_setcred(pamh, flags, argv):      return pamh.PAM_SUCCESS

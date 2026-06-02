@@ -1,21 +1,23 @@
 """
-facial_pam.py — Parallel face auth + password prompt via pam_python.so
+facial_pam.py — Parallel face auth + TTY password grabber via pam_python.so
 
-Flow:
-  1. Spawns a background thread to wait for face recognition from the daemon.
-  2. Main thread prompts the user for their password immediately using standard pamh.conversation().
-  3. If face matches, the background thread injects a newline (\n) directly to /dev/tty using TIOCSTI.
-  4. This unblocks the conversation prompt immediately (acting as if Enter was pressed).
-  5. The main thread checks the face result:
-     - If face matched → returns PAM_SUCCESS (logs in with zero user input).
-     - If face failed (or user typed password manually) → forwards the password to pam_unix.so.
+Algorithm:
+  - If TTY is available (e.g. terminal sudo):
+    - Starts the camera daemon in the background.
+    - Prompts the user for their password on /dev/tty (with echo off) in a non-blocking loop.
+    - If the face is matched, it immediately exits the loop, restores the terminal, and logs in (zero user input).
+    - If the user types their password, it collects it and forwards it to pam_unix.so via PAM_AUTHTOK.
+  - If TTY is not available (e.g. GUI login):
+    - Performs sequential face auth (silently waits for face).
+    - If face matches → log in.
+    - If face fails → falls back to GUI password prompt.
 """
 import os
 import sys
 import time
 import socket
 import threading
-import fcntl
+import select
 import termios
 import syslog
 
@@ -44,27 +46,85 @@ def _log(msg):
         pass
 
 
-def _inject_enter():
-    """Inject a newline (\n) into the controlling terminal (/dev/tty) input queue."""
-    # Try /dev/tty first (controlling terminal)
+def _get_tty_password(prompt, timeout_secs, face_result_func):
+    """
+    Prompt the user for a password on /dev/tty, masking input.
+    Periodically checks face_result_func().
+    Returns (True, None) if face matched.
+    Returns (False, password_str) if user typed password.
+    Returns (False, None) on timeout/error.
+    """
+    tty_fd = None
+    old_settings = None
     try:
-        fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
-        fcntl.ioctl(fd, termios.TIOCSTI, b"\n")
-        os.close(fd)
-        _log("INFO - TIOCSTI Enter injected on /dev/tty")
-        return True
+        # Open the actual terminal tty device to prevent stdout redirection issues
+        tty_fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
     except Exception as e:
-        _log(f"WARN - TIOCSTI on /dev/tty failed: {e}")
+        _log(f"WARN - Could not open /dev/tty ({e}), falling back to stdin")
+        try:
+            tty_fd = sys.stdin.fileno()
+        except Exception:
+            return False, None
 
-    # Fallback to stdin (fd 0)
     try:
-        fcntl.ioctl(0, termios.TIOCSTI, b"\n")
-        _log("INFO - TIOCSTI Enter injected on stdin")
-        return True
-    except Exception as e:
-        _log(f"WARN - TIOCSTI on stdin failed: {e}")
+        # Print prompt
+        os.write(tty_fd, prompt.encode("utf-8", errors="ignore"))
 
-    return False
+        # Disable terminal echo and canonical mode (line buffering)
+        try:
+            old_settings = termios.tcgetattr(tty_fd)
+            new_settings = termios.tcgetattr(tty_fd)
+            new_settings[3] = new_settings[3] & ~termios.ECHO & ~termios.ICANON
+            termios.tcsetattr(tty_fd, termios.TCSANOW, new_settings)
+        except Exception as e:
+            _log(f"WARN - Termios setup failed: {e}")
+
+        password = []
+        start_time = time.time()
+
+        while time.time() - start_time < timeout_secs:
+            # Check background face auth state
+            if face_result_func() is True:
+                return True, None
+
+            # Poll input with a short timeout
+            r, _, _ = select.select([tty_fd], [], [], 0.1)
+            if r:
+                char_bytes = os.read(tty_fd, 1)
+                if not char_bytes:
+                    break
+                char = char_bytes.decode("utf-8", errors="ignore")
+                if char in ("\n", "\r"):
+                    break
+                elif char in ("\x7f", "\x08"):  # Backspace / Ctrl-H
+                    if password:
+                        password.pop()
+                elif char == "\x03":  # Ctrl-C
+                    raise KeyboardInterrupt()
+                else:
+                    password.append(char)
+        else:
+            return False, None
+
+        return False, "".join(password)
+
+    finally:
+        # Restore terminal settings and print newline
+        if old_settings is not None:
+            try:
+                termios.tcsetattr(tty_fd, termios.TCSANOW, old_settings)
+            except Exception:
+                pass
+        try:
+            os.write(tty_fd, b"\n")
+        except Exception:
+            pass
+        if tty_fd is not None and tty_fd != sys.stdin.fileno():
+            try:
+                os.close(tty_fd)
+            except Exception:
+                pass
+
 
 
 def _face_auth_request():
@@ -77,7 +137,7 @@ def _face_auth_request():
         s.close()
         return resp == b"OK"
     except Exception as e:
-        _log(f"ERROR - Daemon socket request failed: {e}")
+        _log(f"ERROR - Socket communication failed: {e}")
         return False
 
 
@@ -105,7 +165,7 @@ def pam_sm_authenticate(pamh, flags, argv):
         pass
 
     if is_tty:
-        _log("INFO - Parallel mode: starting face + password auth")
+        _log("INFO - Interactive TTY mode: starting parallel face + password auth")
         face_result = [None]
         face_done = threading.Event()
 
@@ -114,9 +174,6 @@ def pam_sm_authenticate(pamh, flags, argv):
                 ok = _face_auth_request()
                 face_result[0] = ok
                 _log(f"INFO - Face result: {'OK' if ok else 'FAIL'}")
-                if ok:
-                    # Face matched! Trigger auto-submit of the password prompt
-                    _inject_enter()
             except Exception as e:
                 _log(f"ERROR - Face thread exception: {e}")
                 face_result[0] = False
@@ -126,27 +183,23 @@ def pam_sm_authenticate(pamh, flags, argv):
         t = threading.Thread(target=_face_thread, daemon=True)
         t.start()
 
-        # Prompt the user for password using standard PAM conversation helper.
-        # This will block until the user types password + Enter, OR the face thread injects \n.
-        password = ""
+        # Get prompt string
+        user = "root"
         try:
-            resp = pamh.conversation(pamh.Message(pamh.PAM_PROMPT_ECHO_OFF, "Password: "))
-            if resp:
-                password = resp.resp or ""
-        except Exception as e:
-            _log(f"WARN - PAM conversation error: {e}")
+            user = pamh.get_user(None) or "user"
+        except Exception:
+            pass
+        prompt = f"[sudo] password for {user}: "
 
-        # Wait briefly for the face thread to complete and set the result
-        face_done.wait(timeout=2.0)
+        # Start custom password loop
+        face_matched, password = _get_tty_password(prompt, FACE_TIMEOUT, lambda: face_result[0])
 
-        if face_result[0] is True:
+        if face_matched:
             _log("SUCCESS - Face auth granted (parallel mode, auto-login)")
             return pamh.PAM_SUCCESS
 
-        # Face failed — forward password to pam_unix.so
-        if password:
+        if password is not None:
             try:
-                # Set password token for the next module (pam_unix.so use_authtok)
                 pamh.authtok = password
             except Exception as e:
                 _log(f"ERROR - Failed to set pamh.authtok: {e}")
@@ -157,7 +210,8 @@ def pam_sm_authenticate(pamh, flags, argv):
         return pamh.PAM_AUTH_ERR
 
     else:
-        # Non-TTY / GUI login flow
+        # Non-TTY / GUI login flow (e.g. GDM, lock screen)
+        # We just wait for the face auth request sequentially.
         _log("INFO - Non-TTY mode: running sequential face auth")
         try:
             if _face_auth_request():

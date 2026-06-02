@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh — FaceLock master installer
+# install.sh — FaceLock master installer (libpam-python + daemon edition)
 # Run as root: sudo bash install.sh
 set -euo pipefail
 
@@ -68,53 +68,44 @@ ok "Python venv symlinked → /home/adhi/Desktop/Facenet-training-pipeline/venv"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 5 — Copy recognize_pam.py
+# STEP 5 — Install daemon and pam files
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 5 — Installing recognize_pam.py..."
-cp /home/adhi/Desktop/Facial_lock_sys/recognize_pam.py \
-   /root/facial_lock/recognize_pam.py
-ok "recognize_pam.py installed"
+info "STEP 5 — Installing daemon, PAM module, and standalone recognizer..."
+cp /home/adhi/Desktop/Facial_lock_sys/facial_lock_daemon.py /root/facial_lock/facial_lock_daemon.py
+cp /home/adhi/Desktop/Facial_lock_sys/facial_pam.py /root/facial_lock/facial_pam.py
+cp /home/adhi/Desktop/Facial_lock_sys/recognize_pam.py /root/facial_lock/recognize_pam.py
+ok "Python files installed"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 6 — Copy and secure pam_faciallock.sh
+# STEP 6 — Lock down /root/facial_lock permissions
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 6 — Installing PAM wrapper (pam_faciallock.sh)..."
-cp /home/adhi/Desktop/Facial_lock_sys/pam_faciallock.sh \
-   /root/facial_lock/pam_faciallock.sh
-chmod 755 /root/facial_lock/pam_faciallock.sh
-chown root:root /root/facial_lock/pam_faciallock.sh
-ok "PAM wrapper installed"
-echo ""
-
-# ────────────────────────────────────────────────────────────────────────────
-# STEP 7 — Lock down /root/facial_lock permissions
-# ────────────────────────────────────────────────────────────────────────────
-info "STEP 7 — Securing /root/facial_lock permissions..."
-# chown/chmod only the real files — skip the venv symlink to avoid
-# clobbering the original venv (which lives in /home/adhi's space)
+info "STEP 6 — Securing /root/facial_lock permissions..."
 chown root:root /root/facial_lock
 chmod 755 /root/facial_lock
 chown -R root:root /root/facial_lock/models /root/facial_lock/facenet_weights 2>/dev/null || true
 chmod -R 755 /root/facial_lock/models /root/facial_lock/facenet_weights 2>/dev/null || true
+chmod 755 /root/facial_lock/facial_lock_daemon.py
+chmod 755 /root/facial_lock/facial_pam.py
 chmod 755 /root/facial_lock/recognize_pam.py
-chmod 755 /root/facial_lock/pam_faciallock.sh
-chmod 644 /root/facial_lock/logs/facial_lock.log 2>/dev/null || true
+touch /root/facial_lock/logs/facial_lock.log
+chmod 644 /root/facial_lock/logs/facial_lock.log
+chown root:root /root/facial_lock/logs/facial_lock.log
 ok "Permissions secured"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 8 — Add root to video group
+# STEP 7 — Add root to video group
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 8 — Adding root to video group..."
+info "STEP 7 — Adding root to video group..."
 usermod -aG video root
 ok "root added to video group"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 9 — Install facial_lock CLI
+# STEP 8 — Install facial_lock CLI
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 9 — Installing facial_lock command..."
+info "STEP 8 — Installing facial_lock command..."
 cp /home/adhi/Desktop/Facial_lock_sys/facial_lock /usr/local/bin/facial_lock
 chmod 755 /usr/local/bin/facial_lock
 chown root:root /usr/local/bin/facial_lock
@@ -122,22 +113,16 @@ ok "facial_lock command installed at /usr/local/bin/facial_lock"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 9.5 — Install libpam-script
+# STEP 9 — Install libpam-python
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 9.5 — Installing libpam-script..."
-apt-get install -y libpam-script >/dev/null 2>&1
-ok "libpam-script installed"
+info "STEP 9 — Installing libpam-python..."
+apt-get update -y >/dev/null 2>&1 || true
+apt-get install -y libpam-python >/dev/null 2>&1
+ok "libpam-python installed"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 9.6 — Deploy pam_script_auth
-# ────────────────────────────────────────────────────────────────────────────
-info "STEP 9.6 — Deploying /etc/security/pam_script_auth..."
-cp /root/facial_lock/pam_faciallock.sh /etc/security/pam_script_auth
-chmod 755 /etc/security/pam_script_auth
-chown root:root /etc/security/pam_script_auth
-ok "pam_script_auth deployed"
-echo ""
+# STEP 10 — Install systemd service
 # ────────────────────────────────────────────────────────────────────────────
 info "STEP 10 — Installing systemd service..."
 cp /home/adhi/Desktop/Facial_lock_sys/facial_lock.service \
@@ -170,7 +155,7 @@ inject_pam_line() {
 import sys
 
 pam_file = sys.argv[1]
-face_line = "auth\tsufficient\tpam_script.so\n"
+face_line = "auth\tsufficient\tpam_python.so\t/root/facial_lock/facial_pam.py\n"
 
 with open(pam_file, "r") as f:
     lines = f.readlines()
@@ -221,14 +206,22 @@ ok "PAM configs modified"
 echo ""
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 13 — Create log file
+# STEP 13 — Startup the service to cache models
 # ────────────────────────────────────────────────────────────────────────────
-info "STEP 13 — Creating log file..."
-touch /root/facial_lock/logs/facial_lock.log
-chmod 600 /root/facial_lock/logs/facial_lock.log
-chown root:root /root/facial_lock/logs/facial_lock.log
-ok "Log file created at /root/facial_lock/logs/facial_lock.log"
-echo ""
+info "STEP 13 — Starting FaceLock service to load and cache models..."
+systemctl stop facial_lock.service || true
+systemctl enable facial_lock.service >/dev/null 2>&1
+systemctl start facial_lock.service
+info "         Please wait, models are loading (~25s first time)..."
+
+# Wait for daemon ready
+for i in {1..60}; do
+    if grep -q "daemon ready" /root/facial_lock/logs/facial_lock.log 2>/dev/null; then
+        ok "FaceLock daemon is ready!"
+        break
+    fi
+    sleep 1
+done
 
 # ────────────────────────────────────────────────────────────────────────────
 # STEP 14 — Run a live face recognition test
@@ -237,6 +230,7 @@ info "STEP 14 — Running face recognition test..."
 info "         Look at your webcam for up to 5 seconds..."
 echo ""
 
+# We will test the daemon via our python client or CLI
 set +e
 /root/facial_lock/venv/bin/python3 /root/facial_lock/recognize_pam.py
 TEST_CODE=$?

@@ -10,6 +10,7 @@ os.environ["OPENCV_VIDEOIO_PRIORITY_BACKEND"] = "4"
 os.environ["MPLBACKEND"] = "Agg"
 
 SOCKET_PATH = "/run/facial_lock.sock"
+FLAG_FILE   = "/var/run/facial_lock.active"
 LOG_FILE    = "/root/facial_lock/logs/facial_lock.log"
 MODELS_DIR  = "/root/facial_lock/models"
 FACENET_DIR = "/root/facial_lock/facenet_weights"
@@ -146,7 +147,22 @@ def main():
     srv.bind(SOCKET_PATH)
     os.chmod(SOCKET_PATH, 0o600)
     srv.listen(5)
-    logger.info(f"INFO - Listening on {SOCKET_PATH}")
+
+    # Create flag file NOW — socket is ready, PAM module can connect
+    FLAG_FILE = "/var/run/facial_lock.active"
+    with open(FLAG_FILE, "w") as f:
+        pass
+    logger.info(f"INFO - Listening on {SOCKET_PATH} — daemon ready")
+
+    import signal
+    def _cleanup(sig, frame):
+        try: os.unlink(SOCKET_PATH)
+        except Exception: pass
+        try: os.unlink(FLAG_FILE)
+        except Exception: pass
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _cleanup)
+    signal.signal(signal.SIGINT, _cleanup)
 
     while True:
         try:

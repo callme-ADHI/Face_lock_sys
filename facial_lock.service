@@ -5,7 +5,6 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/root/facial_lock/venv/bin/python3 /root/facial_lock/facial_lock_daemon.py
-ExecStartPost=/usr/bin/touch /var/run/facial_lock.active
 ExecStop=/bin/rm -f /var/run/facial_lock.active /run/facial_lock.sock
 Restart=on-failure
 RestartSec=5
